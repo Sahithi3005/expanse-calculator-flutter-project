@@ -1,0 +1,527 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(ExpenseTrackerApp());
+}
+
+class ExpenseTrackerApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Expense Tracker',
+      theme: ThemeData(
+        primarySwatch: Colors.indigo,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
+      ),
+      home: HomeScreen(),
+    );
+  }
+}
+
+/// Expense model with JSON serialization
+class Expense {
+  int id;
+  String title;
+  double amount;
+  DateTime date;
+  String category;
+
+  Expense({
+    required this.id,
+    required this.title,
+    required this.amount,
+    required this.date,
+    required this.category,
+  });
+
+  factory Expense.fromJson(Map<String, dynamic> json) {
+    return Expense(
+      id: json['id'] as int,
+      title: json['title'] as String,
+      amount: (json['amount'] as num).toDouble(),
+      date: DateTime.parse(json['date'] as String),
+      category: json['category'] as String,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'title': title,
+      'amount': amount,
+      'date': date.toIso8601String(),
+      'category': category,
+    };
+  }
+}
+
+class HomeScreen extends StatefulWidget {
+  @override
+  _HomeScreenState createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  static const String storageKey = 'expenses_list_v1';
+  List<Expense> _expenses = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadExpenses();
+  }
+
+  Future<void> _loadExpenses() async {
+    setState(() => _loading = true);
+    final prefs = await SharedPreferences.getInstance();
+    final jsonString = prefs.getString(storageKey);
+    if (jsonString != null && jsonString.isNotEmpty) {
+      try {
+        final List<dynamic> data = json.decode(jsonString);
+        _expenses = data.map((e) => Expense.fromJson(e)).toList();
+      } catch (e) {
+        // If parse fails, reset list to empty
+        _expenses = [];
+      }
+    } else {
+      _expenses = [];
+    }
+    // sort by date descending (latest first)
+    _expenses.sort((a, b) => b.date.compareTo(a.date));
+    setState(() => _loading = false);
+  }
+
+  Future<void> _saveExpenses() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String jsonString =
+        json.encode(_expenses.map((e) => e.toJson()).toList());
+    await prefs.setString(storageKey, jsonString);
+  }
+
+  double get totalExpenses =>
+      _expenses.fold(0.0, (sum, e) => sum + (e.amount));
+
+  Future<void> _addOrEditExpense({Expense? existing}) async {
+    final result = await Navigator.of(context).push<Expense?>(
+      MaterialPageRoute(
+        builder: (_) => AddEditExpenseScreen(expense: existing),
+      ),
+    );
+
+    if (result != null) {
+      setState(() {
+        if (existing == null) {
+          // add
+          _expenses.add(result);
+        } else {
+          // replace
+          final idx = _expenses.indexWhere((e) => e.id == existing.id);
+          if (idx != -1) _expenses[idx] = result;
+        }
+        // sort after change
+        _expenses.sort((a, b) => b.date.compareTo(a.date));
+      });
+      await _saveExpenses();
+    }
+  }
+
+  Future<void> _deleteExpense(Expense expense) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Delete expense?'),
+        content: Text('Are you sure you want to delete "${expense.title}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(elevation: 0),
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() => _expenses.removeWhere((e) => e.id == expense.id));
+      await _saveExpenses();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Expense deleted')));
+    }
+  }
+
+  String _formatCurrency(double amount) {
+    final f = NumberFormat.currency(symbol: '₹', decimalDigits: 2);
+    return f.format(amount);
+  }
+
+  String _formatDate(DateTime d) {
+    final f = DateFormat('dd MMM yyyy');
+    return f.format(d);
+  }
+
+  Widget _buildEmpty() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.receipt_long, size: 64, color: Colors.grey.shade400),
+          SizedBox(height: 16),
+          Text(
+            'No expenses yet',
+            style: TextStyle(fontSize: 18, color: Colors.grey.shade700),
+          ),
+          SizedBox(height: 8),
+          Text(
+            'Tap + to add your first expense',
+            style: TextStyle(color: Colors.grey.shade500),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildList() {
+    return ListView.separated(
+      padding: EdgeInsets.symmetric(vertical: 8),
+      itemCount: _expenses.length,
+      separatorBuilder: (_, __) => Divider(height: 1),
+      itemBuilder: (context, index) {
+        final exp = _expenses[index];
+        return ListTile(
+          contentPadding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          leading: CircleAvatar(
+            backgroundColor: Colors.indigo.shade50,
+            child: Icon(_categoryIcon(exp.category), color: Colors.indigo),
+          ),
+          title: Text(exp.title, style: TextStyle(fontWeight: FontWeight.w600)),
+          subtitle: Text('${exp.category} • ${_formatDate(exp.date)}'),
+          trailing: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(_formatCurrency(exp.amount),
+                  style: TextStyle(fontWeight: FontWeight.bold)),
+              SizedBox(height: 4),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(Icons.edit, size: 18),
+                    onPressed: () => _addOrEditExpense(existing: exp),
+                    tooltip: 'Edit',
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.delete_outline, size: 18),
+                    onPressed: () => _deleteExpense(exp),
+                    tooltip: 'Delete',
+                  ),
+                ],
+              )
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  IconData _categoryIcon(String category) {
+    switch (category.toLowerCase()) {
+      case 'food':
+        return Icons.fastfood;
+      case 'travel':
+        return Icons.directions_car;
+      case 'bills':
+        return Icons.receipt;
+      case 'shopping':
+        return Icons.shopping_bag;
+      case 'salary':
+        return Icons.wallet;
+      default:
+        return Icons.category;
+    }
+  }
+
+  Future<void> _clearAllData() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Clear all data?'),
+        content: Text('This will permanently delete all saved expenses.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(context, true), child: Text('Clear')),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(storageKey);
+      setState(() => _expenses = []);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('All data cleared')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = totalExpenses;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Expense Tracker'),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.delete_sweep),
+            tooltip: 'Clear all data',
+            onPressed: _expenses.isEmpty ? null : _clearAllData,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Summary card
+          Card(
+            margin: EdgeInsets.fromLTRB(16, 16, 16, 8),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            elevation: 2,
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Total Expenses',
+                            style:
+                                TextStyle(fontSize: 14, color: Colors.grey[700])),
+                        SizedBox(height: 8),
+                        Text(
+                          _formatCurrency(total),
+                          style: TextStyle(
+                              fontSize: 22, fontWeight: FontWeight.bold),
+                        ),
+                        SizedBox(height: 6),
+                        Text(
+                          '${_expenses.length} transactions',
+                          style: TextStyle(color: Colors.grey[600]),
+                        )
+                      ],
+                    ),
+                  ),
+                  Icon(Icons.pie_chart, size: 48, color: Colors.indigo),
+                ],
+              ),
+            ),
+          ),
+
+          // List or empty
+          Expanded(
+            child: _loading
+                ? Center(child: CircularProgressIndicator())
+                : _expenses.isEmpty
+                    ? _buildEmpty()
+                    : _buildList(),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _addOrEditExpense(),
+        label: Text('Add'),
+        icon: Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+/// Screen for adding or editing expense
+class AddEditExpenseScreen extends StatefulWidget {
+  final Expense? expense;
+
+  AddEditExpenseScreen({this.expense});
+
+  @override
+  _AddEditExpenseScreenState createState() => _AddEditExpenseScreenState();
+}
+
+class _AddEditExpenseScreenState extends State<AddEditExpenseScreen> {
+  final _formKey = GlobalKey<FormState>();
+  late TextEditingController _titleController;
+  late TextEditingController _amountController;
+  DateTime _selectedDate = DateTime.now();
+  String _selectedCategory = 'Food';
+
+  final List<String> _categories = [
+    'Food',
+    'Travel',
+    'Bills',
+    'Shopping',
+    'Salary',
+    'Other'
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.expense;
+    _titleController = TextEditingController(text: e?.title ?? '');
+    _amountController = TextEditingController(
+        text: e != null ? e.amount.toStringAsFixed(2) : '');
+    _selectedDate = e?.date ?? DateTime.now();
+    _selectedCategory = e?.category ?? 'Food';
+  }
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _amountController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _selectedDate,
+      firstDate: DateTime(2000),
+      lastDate: DateTime.now().add(Duration(days: 365 * 5)),
+    );
+    if (picked != null) {
+      setState(() => _selectedDate = picked);
+    }
+  }
+
+  void _save() {
+    if (!_formKey.currentState!.validate()) return;
+
+    final title = _titleController.text.trim();
+    final amount = double.tryParse(_amountController.text.trim()) ?? 0.0;
+
+    final id = widget.expense?.id ?? DateTime.now().millisecondsSinceEpoch;
+
+    final expense = Expense(
+      id: id,
+      title: title,
+      amount: amount,
+      date: _selectedDate,
+      category: _selectedCategory,
+    );
+
+    Navigator.of(context).pop(expense);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEditing = widget.expense != null;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEditing ? 'Edit Expense' : 'Add Expense'),
+      ),
+      body: Padding(
+        padding: EdgeInsets.all(16),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              // Title
+              TextFormField(
+                controller: _titleController,
+                decoration: InputDecoration(
+                  labelText: 'Title (e.g., Lunch, Uber)',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? 'Enter title' : null,
+              ),
+              SizedBox(height: 12),
+
+              // Amount
+              TextFormField(
+                controller: _amountController,
+                keyboardType:
+                    TextInputType.numberWithOptions(decimal: true, signed: false),
+                decoration: InputDecoration(
+                  labelText: 'Amount',
+                  prefixText: '₹ ',
+                  border: OutlineInputBorder(),
+                ),
+                validator: (v) {
+                  if (v == null || v.trim().isEmpty) return 'Enter amount';
+                  final n = double.tryParse(v.trim());
+                  if (n == null || n <= 0) return 'Enter valid amount';
+                  return null;
+                },
+              ),
+              SizedBox(height: 12),
+
+              // Category and date row
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      value: _selectedCategory,
+                      items: _categories
+                          .map((c) => DropdownMenuItem(
+                                value: c,
+                                child: Text(c),
+                              ))
+                          .toList(),
+                      decoration: InputDecoration(
+                        labelText: 'Category',
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (v) {
+                        if (v != null) setState(() => _selectedCategory = v);
+                      },
+                    ),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: InkWell(
+                      onTap: _pickDate,
+                      child: InputDecorator(
+                        decoration: InputDecoration(
+                          labelText: 'Date',
+                          border: OutlineInputBorder(),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(DateFormat('dd MMM yyyy').format(_selectedDate)),
+                            Icon(Icons.calendar_today, size: 18),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              Spacer(),
+
+              // Save button
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _save,
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Text(isEditing ? 'Save changes' : 'Add expense',
+                        style: TextStyle(fontSize: 16)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
